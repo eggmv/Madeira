@@ -20,31 +20,16 @@ jobs:
         with:
           submodules: recursive
       
-      - name: Download dependencies from builds branch
+      - name: Download dependencies from latest Release
         run: |
           set -e
-          echo "⬇️  Downloading dependencies..."
+          echo "⬇️  Downloading dependencies from latest release..."
           
-          # Try to download from builds branch
-          if git ls-remote --heads origin builds | grep -q builds; then
-            git fetch origin builds --depth=1
-            
-            # Find latest build directory
-            LATEST_BUILD=$(git ls-tree -r origin/builds --name-only | grep "^builds/" | grep "\.a$" | head -1 | cut -d/ -f1-2)
-            
-            if [ -n "$LATEST_BUILD" ]; then
-              echo "📦 Found build: $LATEST_BUILD"
-              mkdir -p app/Madeira
-              git show "origin/builds:$LATEST_BUILD/libntdll_unix.a" > app/Madeira/libntdll_unix.a 2>/dev/null || true
-              git show "origin/builds:$LATEST_BUILD/libwin32u_unix.a" > app/Madeira/libwin32u_unix.a 2>/dev/null || true
-              git show "origin/builds:$LATEST_BUILD/libdxmt_combined.a" > app/Madeira/libdxmt_combined.a 2>/dev/null || true
-              git show "origin/builds:$LATEST_BUILD/libdxmt_unix.a" > app/Madeira/libdxmt_unix.a 2>/dev/null || true
-            fi
-          fi
+          # Get the latest deps release
+          LATEST_RELEASE=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
           
-          # Check if we have the libraries
-          if [ ! -f "app/Madeira/libntdll_unix.a" ]; then
-            echo "❌ Dependencies not found!"
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "❌ No dependency releases found!"
             echo ""
             echo "To build the app, you must first build the dependencies:"
             echo "  1. Go to Actions → Build Dependencies"
@@ -54,8 +39,35 @@ jobs:
             exit 1
           fi
           
-          echo "✅ Dependencies found:"
+          echo "📦 Found release: $LATEST_RELEASE"
+          
+          mkdir -p app/Madeira
+          
+          # Download .a files
+          gh release download "$LATEST_RELEASE" \
+            --pattern "*.a" \
+            --dir app/Madeira 2>/dev/null || true
+          
+          # Download and extract gnutls
+          gh release download "$LATEST_RELEASE" \
+            --pattern "gnutls-ios.tar.gz" \
+            --dir . 2>/dev/null || true
+          
+          if [ -f "gnutls-ios.tar.gz" ]; then
+            tar -xzf gnutls-ios.tar.gz
+            rm gnutls-ios.tar.gz
+          fi
+          
+          # Check if we have the libraries
+          if [ ! -f "app/Madeira/libntdll_unix.a" ]; then
+            echo "❌ Dependencies not found in release!"
+            exit 1
+          fi
+          
+          echo "✅ Dependencies downloaded:"
           ls -lh app/Madeira/*.a 2>/dev/null | awk '{print "   " $9 " (" $5 ")"}'
+        env:
+          GH_TOKEN: ${{ github.token }}
       
       - name: Build with xcodebuild
         run: |
@@ -81,47 +93,44 @@ jobs:
             echo "   $(basename "$f") - $(du -h "$f" | cut -f1)"
           done
       
-      - name: Upload build artifacts
+      - name: Upload to GitHub Release
+        if: success()
+        run: |
+          set -e
+          echo "📤 Uploading to GitHub Release..."
+          
+          # Get or create release
+          VERSION="app-$(date -u +%Y-%m-%d)_$(git rev-parse --short HEAD)"
+          
+          # Find IPA
+          IPA_FILE=$(find build/derived/Build/Products/Release-iphoneos -name "*.ipa" | head -1)
+          
+          if [ -z "$IPA_FILE" ]; then
+            echo "❌ No IPA file found!"
+            exit 1
+          fi
+          
+          echo "📦 Uploading: $(basename "$IPA_FILE")"
+          
+          # Create or update release
+          gh release create "$VERSION" \
+            "$IPA_FILE" \
+            --title "Madeira Build - $(date -u +%Y-%m-%d)" \
+            --notes "Built from commit: ${{ github.sha }}" \
+            --target main 2>/dev/null || \
+          gh release upload "$VERSION" "$IPA_FILE" --clobber
+          
+          echo "✅ Uploaded to release: $VERSION"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      
+      - name: Upload build artifacts (Actions backup)
         if: success()
         uses: actions/upload-artifact@v3
         with:
           name: Madeira-${{ github.sha }}
           path: build/derived/Build/Products/Release-iphoneos/
           retention-days: 14
-      
-      - name: Push build to builds branch
-        if: success()
-        run: |
-          set -e
-          echo "📤 Pushing build to builds branch..."
-          
-          # Create build directory
-          BUILD_DIR="builds/$(date -u +%Y-%m-%d_%H-%M-%S)"
-          mkdir -p "$BUILD_DIR"
-          
-          # Copy app
-          find build/derived/Build/Products/Release-iphoneos -name "Madeira.app" -exec cp -r {} "$BUILD_DIR/" \; 2>/dev/null || true
-          find build/derived/Build/Products/Release-iphoneos -name "*.ipa" -exec cp {} "$BUILD_DIR/" \; 2>/dev/null || true
-          
-          # Create metadata
-          cat > "$BUILD_DIR/BUILD_INFO.txt" <<EOF
-Build Date: $(date -u)
-Commit: $(git rev-parse --short HEAD)
-Branch: main
-EOF
-          
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
-          # Checkout/create builds branch
-          git fetch origin builds 2>/dev/null || true
-          git checkout -b builds origin/builds 2>/dev/null || git checkout -b builds
-          
-          # Add and commit
-          git add "$BUILD_DIR"
-          git commit -m "Add app build from $(git rev-parse --short HEAD) - $(date -u +%Y-%m-%d)" || true
-          git push origin builds
       
       - name: Upload build logs
         if: failure()
