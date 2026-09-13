@@ -77,6 +77,40 @@ jobs:
             toolchains/gnutls-ios/
           retention-days: 30
       
+      - name: Push libraries to builds branch
+        if: success()
+        run: |
+          set -e
+          echo "📤 Pushing libraries to builds branch..."
+          
+          # Create builds directory for this timestamp
+          BUILD_DIR="builds/$(date -u +%Y-%m-%d_%H-%M-%S)"
+          mkdir -p "$BUILD_DIR"
+          
+          # Copy artifacts
+          cp app/Madeira/*.a "$BUILD_DIR/" 2>/dev/null || true
+          cp -r toolchains/gnutls-ios "$BUILD_DIR/" 2>/dev/null || true
+          
+          # Create metadata
+          cat > "$BUILD_DIR/BUILD_INFO.txt" <<EOF
+Build Date: $(date -u)
+Commit: $(git rev-parse --short HEAD)
+Branch: main
+EOF
+          
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # Checkout builds branch
+          git fetch origin builds 2>/dev/null || true
+          git checkout -b builds origin/builds 2>/dev/null || git checkout -b builds
+          
+          # Add and commit
+          git add "$BUILD_DIR"
+          git commit -m "Add build from $(git rev-parse --short HEAD) - $(date -u +%Y-%m-%d)" || true
+          git push origin builds
+      
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v3
