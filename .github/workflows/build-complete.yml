@@ -15,124 +15,149 @@ concurrency:
 
 permissions:
   contents: write
-  
+
 jobs:
   build-complete:
     name: Build Everything (Dependencies + App)
     runs-on: macos-latest
     timeout-minutes: 150
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      
+
       - name: Generate version tag
         id: version
         run: |
           VERSION="complete-$(date -u +%Y-%m-%d)_$(git rev-parse --short HEAD)"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
-      
+
       - name: Build freetype (iOS)
         run: |
           set -e
           echo "🔨 [1/6] Building freetype..."
-          
-          # Clone freetype if not present
           if [ ! -d "research/freetype/.git" ]; then
             git clone --depth 1 --branch VER-2-13-3 \
               https://github.com/freetype/freetype.git research/freetype
           fi
-          
           cd build/freetype-ios
           bash ./build.sh 2>&1 | tail -20
-      
+
       - name: Build GnuTLS stack
         run: |
           set -e
           echo "🔨 [2/6] Building GnuTLS (gmp, nettle, gnutls)..."
           cd build/gnutls-ios
           bash ./build.sh 2>&1 | tail -20
-      
+
       - name: Build Wine ntdll unix
         run: |
           set -e
           echo "🔨 [3/6] Building Wine ntdll unix..."
           cd build/ntdll-unix
           bash ./build.sh 2>&1 | tail -20
-      
+
       - name: Build Wine win32u unix
         run: |
           set -e
           echo "🔨 [4/6] Building Wine win32u unix..."
           cd build/win32u-unix
           bash ./build.sh 2>&1 | tail -20
-      
+
       - name: Build DXMT
         run: |
           set -e
           echo "🔨 [5/6] Building DXMT..."
           cd build/dxmt-ios
           bash ./build.sh 2>&1 | tail -20
-      
+
       - name: Verify dependencies
         run: |
           echo "📦 Verifying build artifacts:"
           ls -lh app/Madeira/*.a 2>/dev/null | awk '{print "   " $9 " (" $5 ")"}' || exit 1
           du -sh app/Madeira/ 2>/dev/null || true
-      
+
       - name: Build iOS app
         run: |
-          set -e
+          set -o pipefail
           echo "🔨 [6/6] Building iOS app..."
           cd app/Madeira
-          
+
           xcodebuild \
             -scheme Madeira \
             -configuration Release \
             -derivedDataPath ../../build/derived \
             -destination 'generic/platform=iOS' \
             -parallelizeTargets \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
             build 2>&1 | tail -50
-      
+
+      - name: Create IPA Package
+        run: |
+          set -e
+          echo "📦 Packaging Madeira.ipa..."
+          
+          APP_PATH=$(find build/derived/Build/Products -type d -name "*.app" | head -n 1)
+          
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ Error: Madeira.app was not found in derived data!"
+            exit 1
+          fi
+
+          echo "Found APP at: $APP_PATH"
+          
+          # Create temporary Payload structure for IPA standard
+          mkdir -p build/ipa_temp/Payload
+          cp -R "$APP_PATH" build/ipa_temp/Payload/
+          
+          cd build/ipa_temp
+          zip -r ../derived/Build/Products/Madeira.ipa Payload
+          cd ../..
+          
+          echo "✅ Created IPA successfully."
+
       - name: Verify app build
         if: success()
         run: |
           echo "✅ Build chain completed successfully!"
           echo ""
           echo "📦 Final artifacts:"
-          find build/derived/Build/Products -type f \( -name "*.app" -o -name "*.ipa" \) 2>/dev/null | while read f; do
-            echo "   $(basename "$f") - $(du -h "$f" | cut -f1)"
+          find build/derived/Build/Products -type f -name "*.ipa" -o -type d -name "*.app" 2>/dev/null | while read f; do
+            echo "   $(basename "$f") - $(du -sh "$f" | cut -f1)"
           done
-      
+
       - name: Package all artifacts
         if: success()
         run: |
           set -e
           echo "📦 Packaging artifacts for release..."
-          
+
           mkdir -p release
-          
+
           # Copy .a files
           cp app/Madeira/*.a release/ 2>/dev/null || true
-          
+
           # Copy gnutls toolchain
           tar -czf release/gnutls-ios.tar.gz toolchains/gnutls-ios/ 2>/dev/null || true
-          
+
           # Copy IPA/APP
-          find build/derived/Build/Products/Release-iphoneos -name "*.ipa" -exec cp {} release/ \; 2>/dev/null || true
-          find build/derived/Build/Products/Release-iphoneos -name "*.app" -exec cp -r {} release/ \; 2>/dev/null || true
-          
+          find build/derived/Build/Products -name "*.ipa" -exec cp {} release/ \; 2>/dev/null || true
+          find build/derived/Build/Products -type d -name "*.app" -exec cp -r {} release/ \; 2>/dev/null || true
+
           # Create checksums
           cd release
-          sha256sum * > SHA256SUMS 2>/dev/null || true
+          shasum -a 256 * > SHA256SUMS 2>/dev/null || true
           cd ..
-          
+
           echo "✅ Release package contents:"
           ls -lh release/
-      
+
       - name: Create GitHub Release
         if: success()
         uses: ncipollo/release-action@v1
@@ -141,11 +166,11 @@ jobs:
           name: "Complete Build - ${{ steps.version.outputs.version }}"
           body: |
             ## Madeira Complete Build
-            
+
             ✅ Full build from dependencies to app
-            
+
             Built from commit: ${{ github.sha }}
-            
+
             Contains:
             - **Build Dependencies:**
               - `libntdll_unix.a` - Wine ntdll unix side
@@ -153,20 +178,20 @@ jobs:
               - `libdxmt_unix.a` - DXMT unix side
               - `libdxmt_combined.a` - DXMT combined with LLVM
               - `gnutls-ios.tar.gz` - GnuTLS toolchain
-            
+
             - **Final App:**
               - `Madeira.ipa` - Ready to sideload
               - `Madeira.app` - Unsigned app bundle
-            
+
             - `SHA256SUMS` - Checksums for all files
-            
+
             ### To use the app:
             1. Download `Madeira.ipa`
-            2. Sideload using Xcode, AltStore, or similar
+            2. Sideload using Xcode, AltStore, SideStore, or similar
             3. Attach with [StikDebug](https://github.com/0-Blu/StikJIT) for JIT
           artifacts: release/*
           token: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Upload build artifacts (Actions backup)
         if: success()
         uses: actions/upload-artifact@v4
@@ -174,7 +199,7 @@ jobs:
           name: Madeira-complete-${{ github.sha }}
           path: release/
           retention-days: 14
-      
+
       - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -184,3 +209,4 @@ jobs:
             build/**/obj/*.err
             build/derived/Logs/
           retention-days: 7
+
