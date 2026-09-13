@@ -1,0 +1,86 @@
+name: Build Dependencies
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+concurrency:
+  group: build-deps
+  cancel-in-progress: false
+
+jobs:
+  build-libs:
+    name: Build all .a libraries
+    runs-on: macos-latest
+    timeout-minutes: 120
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Build freetype (iOS)
+        run: |
+          set -e
+          echo "🔨 Building freetype..."
+          
+          # Clone freetype if not present
+          if [ ! -d "research/freetype/.git" ]; then
+            git clone --depth 1 --branch VER-2-13-3 \
+              https://github.com/freetype/freetype.git research/freetype
+          fi
+          
+          cd build/freetype-ios
+          bash ./build.sh 2>&1 | tail -20
+      
+      - name: Build GnuTLS stack
+        run: |
+          set -e
+          echo "🔨 Building GnuTLS (gmp, nettle, gnutls)..."
+          cd build/gnutls-ios
+          bash ./build.sh 2>&1 | tail -20
+      
+      - name: Build Wine ntdll unix
+        run: |
+          set -e
+          echo "🔨 Building Wine ntdll unix..."
+          cd build/ntdll-unix
+          bash ./build.sh 2>&1 | tail -20
+      
+      - name: Build Wine win32u unix
+        run: |
+          set -e
+          echo "🔨 Building Wine win32u unix..."
+          cd build/win32u-unix
+          bash ./build.sh 2>&1 | tail -20
+      
+      - name: Build DXMT
+        run: |
+          set -e
+          echo "🔨 Building DXMT..."
+          cd build/dxmt-ios
+          bash ./build.sh 2>&1 | tail -20
+      
+      - name: Verify artifacts
+        run: |
+          echo "📦 Built artifacts:"
+          ls -lh app/Madeira/*.a 2>/dev/null || echo "(no .a files yet)"
+          du -sh app/Madeira/ 2>/dev/null || true
+      
+      - name: Upload all libs as artifacts
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: madeira-libs
+          path: |
+            app/Madeira/*.a
+            toolchains/gnutls-ios/
+          retention-days: 30
+      
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-logs
+          path: build/**/obj/*.err
+          retention-days: 7
