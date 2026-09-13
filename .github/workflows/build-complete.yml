@@ -84,12 +84,17 @@ jobs:
         run: |
           set -o pipefail
           echo "🔨 [6/6] Building iOS app..."
-          cd app/Madeira
 
+          # Debug: Output directory contents to confirm target location
+          echo "📂 Current directory content:"
+          ls -la app/Madeira || ls -la
+
+          # Adjust -project or -workspace path below if your .xcodeproj is named differently
           xcodebuild \
+            -project app/Madeira/Madeira.xcodeproj \
             -scheme Madeira \
             -configuration Release \
-            -derivedDataPath ../../build/derived \
+            -derivedDataPath build/derived \
             -destination 'generic/platform=iOS' \
             -parallelizeTargets \
             CODE_SIGNING_ALLOWED=NO \
@@ -112,7 +117,6 @@ jobs:
 
           echo "Found APP at: $APP_PATH"
           
-          # Create temporary Payload structure for IPA standard
           mkdir -p build/ipa_temp/Payload
           cp -R "$APP_PATH" build/ipa_temp/Payload/
           
@@ -121,6 +125,7 @@ jobs:
           cd ../..
           
           echo "✅ Created IPA successfully."
+
 
       - name: Verify app build
         if: success()
