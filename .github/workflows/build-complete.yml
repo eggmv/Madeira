@@ -13,6 +13,9 @@ concurrency:
   group: build-complete
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  
 jobs:
   build-complete:
     name: Build Everything (Dependencies + App)
@@ -132,9 +135,9 @@ jobs:
       
       - name: Create GitHub Release
         if: success()
-        uses: softprops/action-gh-release@v1
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ steps.version.outputs.version }}
+          tag: ${{ steps.version.outputs.version }}
           name: "Complete Build - ${{ steps.version.outputs.version }}"
           body: |
             ## Madeira Complete Build
@@ -161,10 +164,8 @@ jobs:
             1. Download `Madeira.ipa`
             2. Sideload using Xcode, AltStore, or similar
             3. Attach with [StikDebug](https://github.com/0-Blu/StikJIT) for JIT
-          files: |
-            release/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: release/*
+          token: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload build artifacts (Actions backup)
         if: success()
