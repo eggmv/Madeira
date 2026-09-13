@@ -1,20 +1,18 @@
-name: Build Madeira iOS App
+name: Build App
 
 on:
-  workflow_dispatch:  # Manual trigger (free tier friendly)
-  pull_request:
-    branches: [main]
+  workflow_dispatch:  # Manual trigger
   push:
     branches: [main]
     paths:
       - 'app/**'
-      - '.github/workflows/build.yml'
+      - '.github/workflows/build-app.yml'
 
 jobs:
-  build:
-    name: Build Madeira
+  build-app:
+    name: Build iOS App
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     
     steps:
       - name: Checkout
@@ -22,63 +20,108 @@ jobs:
         with:
           submodules: recursive
       
-      - name: Restore build cache
-        id: cache
-        uses: actions/cache@v3
-        with:
-          path: |
-            app/Madeira/libntdll_unix.a
-            app/Madeira/libwin32u_unix.a
-            app/Madeira/libdxmt_combined.a
-            app/Madeira/libdxmt_unix.a
-          key: madeira-libs-${{ hashFiles('.gitmodules') }}
-          restore-keys: |
-            madeira-libs-
-      
-      - name: ⚠️ Cache miss warning
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Download dependencies from builds branch
         run: |
-          echo "❌ Build libraries not cached!"
-          echo ""
-          echo "To generate the cache, run the 'Build Dependencies' workflow:"
-          echo "  1. Go to Actions → Build Dependencies"
-          echo "  2. Click 'Run workflow' → Run workflow"
-          echo "  3. Wait ~90 minutes for it to complete"
-          echo "  4. Then retry this app build"
-          echo ""
-          echo "Or, if you have a Mac locally, run:"
-          echo "  cd build/ntdll-unix && ./build.sh"
-          echo "  cd ../win32u-unix && ./build.sh"
-          echo "  cd ../dxmt-ios && ./build.sh"
-          echo "  git add app/Madeira/*.a && git commit"
-          exit 1
+          set -e
+          echo "⬇️  Downloading dependencies..."
+          
+          # Try to download from builds branch
+          if git ls-remote --heads origin builds | grep -q builds; then
+            git fetch origin builds --depth=1
+            
+            # Find latest build directory
+            LATEST_BUILD=$(git ls-tree -r origin/builds --name-only | grep "^builds/" | grep "\.a$" | head -1 | cut -d/ -f1-2)
+            
+            if [ -n "$LATEST_BUILD" ]; then
+              echo "📦 Found build: $LATEST_BUILD"
+              mkdir -p app/Madeira
+              git show "origin/builds:$LATEST_BUILD/libntdll_unix.a" > app/Madeira/libntdll_unix.a 2>/dev/null || true
+              git show "origin/builds:$LATEST_BUILD/libwin32u_unix.a" > app/Madeira/libwin32u_unix.a 2>/dev/null || true
+              git show "origin/builds:$LATEST_BUILD/libdxmt_combined.a" > app/Madeira/libdxmt_combined.a 2>/dev/null || true
+              git show "origin/builds:$LATEST_BUILD/libdxmt_unix.a" > app/Madeira/libdxmt_unix.a 2>/dev/null || true
+            fi
+          fi
+          
+          # Check if we have the libraries
+          if [ ! -f "app/Madeira/libntdll_unix.a" ]; then
+            echo "❌ Dependencies not found!"
+            echo ""
+            echo "To build the app, you must first build the dependencies:"
+            echo "  1. Go to Actions → Build Dependencies"
+            echo "  2. Click 'Run workflow' → 'Run workflow'"
+            echo "  3. Wait ~90 minutes"
+            echo "  4. Then run this workflow"
+            exit 1
+          fi
+          
+          echo "✅ Dependencies found:"
+          ls -lh app/Madeira/*.a 2>/dev/null | awk '{print "   " $9 " (" $5 ")"}'
       
-      - name: Build iOS app
+      - name: Build with xcodebuild
         run: |
           set -e
           cd app/Madeira
           
-          echo "📦 Building Madeira app..."
+          echo "🔨 Building iOS app..."
           xcodebuild \
             -scheme Madeira \
             -configuration Release \
             -derivedDataPath ../../build/derived \
             -destination 'generic/platform=iOS' \
             -parallelizeTargets \
-            build
+            build 2>&1 | tail -50
       
-      - name: Verify build output
+      - name: Show build output
+        if: success()
         run: |
-          echo "✅ Build artifacts:"
-          find build/derived/Build/Products -type f \( -name "*.app" -o -name "*.ipa" \) 2>/dev/null | head -5 || echo "No app/ipa files found"
+          echo "✅ Build succeeded!"
+          echo ""
+          echo "📦 Build artifacts:"
+          find build/derived/Build/Products -type f \( -name "*.app" -o -name "*.ipa" \) 2>/dev/null | while read f; do
+            echo "   $(basename "$f") - $(du -h "$f" | cut -f1)"
+          done
       
-      - name: Upload app
+      - name: Upload build artifacts
         if: success()
         uses: actions/upload-artifact@v3
         with:
           name: Madeira-${{ github.sha }}
           path: build/derived/Build/Products/Release-iphoneos/
-          retention-days: 7
+          retention-days: 14
+      
+      - name: Push build to builds branch
+        if: success()
+        run: |
+          set -e
+          echo "📤 Pushing build to builds branch..."
+          
+          # Create build directory
+          BUILD_DIR="builds/$(date -u +%Y-%m-%d_%H-%M-%S)"
+          mkdir -p "$BUILD_DIR"
+          
+          # Copy app
+          find build/derived/Build/Products/Release-iphoneos -name "Madeira.app" -exec cp -r {} "$BUILD_DIR/" \; 2>/dev/null || true
+          find build/derived/Build/Products/Release-iphoneos -name "*.ipa" -exec cp {} "$BUILD_DIR/" \; 2>/dev/null || true
+          
+          # Create metadata
+          cat > "$BUILD_DIR/BUILD_INFO.txt" <<EOF
+Build Date: $(date -u)
+Commit: $(git rev-parse --short HEAD)
+Branch: main
+EOF
+          
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # Checkout/create builds branch
+          git fetch origin builds 2>/dev/null || true
+          git checkout -b builds origin/builds 2>/dev/null || git checkout -b builds
+          
+          # Add and commit
+          git add "$BUILD_DIR"
+          git commit -m "Add app build from $(git rev-parse --short HEAD) - $(date -u +%Y-%m-%d)" || true
+          git push origin builds
       
       - name: Upload build logs
         if: failure()
