@@ -13,11 +13,21 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 120
     
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+      
+      - name: Generate version tag
+        id: version
+        run: |
+          VERSION="$(date -u +%Y-%m-%d)_$(git rev-parse --short HEAD)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
       
       - name: Build freetype (iOS)
         run: |
@@ -67,54 +77,57 @@ jobs:
           ls -lh app/Madeira/*.a 2>/dev/null || echo "(no .a files yet)"
           du -sh app/Madeira/ 2>/dev/null || true
       
-      - name: Upload all libs as artifacts
-        if: success()
-        uses: actions/upload-artifact@v3
-        with:
-          name: madeira-libs
-          path: |
-            app/Madeira/*.a
-            toolchains/gnutls-ios/
-          retention-days: 30
-      
-      - name: Push libraries to builds branch
+      - name: Package libraries
         if: success()
         run: |
           set -e
-          echo "📤 Pushing libraries to builds branch..."
+          echo "📦 Packaging libraries..."
           
-          # Create builds directory for this timestamp
-          BUILD_DIR="builds/$(date -u +%Y-%m-%d_%H-%M-%S)"
-          mkdir -p "$BUILD_DIR"
+          mkdir -p release
           
-          # Copy artifacts
-          cp app/Madeira/*.a "$BUILD_DIR/" 2>/dev/null || true
-          cp -r toolchains/gnutls-ios "$BUILD_DIR/" 2>/dev/null || true
+          # Copy all .a files
+          cp app/Madeira/*.a release/ 2>/dev/null || true
           
-          # Create metadata
-          cat > "$BUILD_DIR/BUILD_INFO.txt" <<EOF
-Build Date: $(date -u)
-Commit: $(git rev-parse --short HEAD)
-Branch: main
-EOF
+          # Copy gnutls toolchain
+          tar -czf release/gnutls-ios.tar.gz toolchains/gnutls-ios/ 2>/dev/null || true
           
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Create checksums
+          cd release
+          sha256sum * > SHA256SUMS
+          cd ..
           
-          # Checkout builds branch
-          git fetch origin builds 2>/dev/null || true
-          git checkout -b builds origin/builds 2>/dev/null || git checkout -b builds
-          
-          # Add and commit
-          git add "$BUILD_DIR"
-          git commit -m "Add build from $(git rev-parse --short HEAD) - $(date -u +%Y-%m-%d)" || true
-          git push origin builds
+          echo "✅ Release contents:"
+          ls -lh release/
+      
+      - name: Create GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: deps-${{ steps.version.outputs.version }}
+          name: "Dependencies - ${{ steps.version.outputs.version }}"
+          body: |
+            ## Madeira Build Dependencies
+            
+            Built from commit: ${{ github.sha }}
+            
+            Contains:
+            - `libntdll_unix.a` - Wine ntdll unix side
+            - `libwin32u_unix.a` - Wine win32u unix side
+            - `libdxmt_unix.a` - DXMT unix side
+            - `libdxmt_combined.a` - DXMT combined with LLVM
+            - `gnutls-ios.tar.gz` - GnuTLS toolchain (extract to `toolchains/`)
+            - `SHA256SUMS` - Checksums for verification
+            
+            To use: Extract the `.a` files to `app/Madeira/` and the `.tar.gz` to `toolchains/`
+          files: |
+            release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v3
         with:
-          name: build-logs
+          name: build-logs-${{ steps.version.outputs.version }}
           path: build/**/obj/*.err
           retention-days: 7
