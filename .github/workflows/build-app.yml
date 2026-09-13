@@ -1,0 +1,89 @@
+name: Build Madeira iOS App
+
+on:
+  workflow_dispatch:  # Manual trigger (free tier friendly)
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    name: Build Madeira
+    runs-on: macos-latest
+    timeout-minutes: 90
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            app/Madeira/libntdll_unix.a
+            app/Madeira/libwin32u_unix.a
+            app/Madeira/libdxmt_combined.a
+            app/Madeira/libdxmt_unix.a
+          key: madeira-libs-${{ hashFiles('.gitmodules') }}
+          restore-keys: |
+            madeira-libs-
+      
+      - name: ⚠️ Cache miss warning
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          echo "❌ Build libraries not cached!"
+          echo ""
+          echo "To generate the cache, run the 'Build Dependencies' workflow:"
+          echo "  1. Go to Actions → Build Dependencies"
+          echo "  2. Click 'Run workflow' → Run workflow"
+          echo "  3. Wait ~90 minutes for it to complete"
+          echo "  4. Then retry this app build"
+          echo ""
+          echo "Or, if you have a Mac locally, run:"
+          echo "  cd build/ntdll-unix && ./build.sh"
+          echo "  cd ../win32u-unix && ./build.sh"
+          echo "  cd ../dxmt-ios && ./build.sh"
+          echo "  git add app/Madeira/*.a && git commit"
+          exit 1
+      
+      - name: Build iOS app
+        run: |
+          set -e
+          cd app/Madeira
+          
+          echo "📦 Building Madeira app..."
+          xcodebuild \
+            -scheme Madeira \
+            -configuration Release \
+            -derivedDataPath ../../build/derived \
+            -destination 'generic/platform=iOS' \
+            -parallelizeTargets \
+            build
+      
+      - name: Verify build output
+        run: |
+          echo "✅ Build artifacts:"
+          find build/derived/Build/Products -type f \( -name "*.app" -o -name "*.ipa" \) 2>/dev/null | head -5 || echo "No app/ipa files found"
+      
+      - name: Upload app
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: Madeira-${{ github.sha }}
+          path: build/derived/Build/Products/Release-iphoneos/
+          retention-days: 7
+      
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-logs-${{ github.sha }}
+          path: build/derived/Logs/
+          retention-days: 3
