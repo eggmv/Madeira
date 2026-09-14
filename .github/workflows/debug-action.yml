@@ -21,53 +21,67 @@ jobs:
       - name: Install System Build Dependencies
         run: |
           echo "Installing build prerequisites via Homebrew..."
-          brew install cmake ninja pkg-config llvm bison flex llvm@18 || true
-          echo "PATH=$(brew --prefix llvm)/bin:$PATH" >> $GITHUB_ENV
+          brew install cmake ninja pkg-config bison flex
 
-      - name: Force Initialize Submodules
+      - name: Sync and Force Update Submodules
         run: |
           set -e
-          echo "Checking git submodules..."
           git submodule sync --recursive
           git submodule update --init --recursive --force
-          git submodule status --recursive
 
-      - name: Verify Submodule Directory Contents
+      - name: Create Required Base Directories
         run: |
-          set -e
-          echo "Checking directory paths for build targets..."
-          ls -la
-          ls -la build/ || true
-          ls -la research/ || true
-
-      - name: Create Required Directory Structure
-        run: |
+          mkdir -p toolchains
           mkdir -p app/Madeira
           mkdir -p build/derived
           mkdir -p build/ntdll-unix/obj
           mkdir -p build/win32u-unix/obj
           mkdir -p build/dxmt-ios/obj
 
-      - name: Execute Native Build Scripts
+      - name: Fetch and Setup llvm-mingw Toolchain
         run: |
           set -e
-          echo "Running build.sh scripts..."
+          echo "🔍 Setting up llvm-mingw toolchain..."
           
-          # Iterate over all build scripts in build/ subdirectories
-          for script in build/*/build.sh; do
-            if [ -f "$script" ]; then
+          TOOLCHAIN_DIR="toolchains/llvm-mingw-20260421-ucrt-macos-universal"
+          
+          if [ ! -d "$TOOLCHAIN_DIR" ]; then
+            echo "📦 Toolchain not found locally. Downloading llvm-mingw release..."
+            
+            # Download llvm-mingw toolchain tarball
+            curl -L -o toolchains/llvm-mingw.tar.xz \
+              https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/llvm-mingw-20260421-ucrt-macos-universal.tar.xz
+            
+            echo "📦 Extracting toolchain..."
+            tar -xf toolchains/llvm-mingw.tar.xz -C toolchains/
+            rm toolchains/llvm-mingw.tar.xz
+          fi
+
+          echo "✅ Toolchain path verification:"
+          ls -la "$TOOLCHAIN_DIR/bin/x86_64-w64-mingw32-clang"
+
+      - name: Build Native Modules (Specific Dependency Order)
+        run: |
+          set -e
+          
+          # List build subdirectories in their proper dependency order
+          BUILD_DIRS=(
+            "build/freetype-ios"
+            "build/gnutls-ios"
+            "build/ntdll-unix"
+            "build/win32u-unix"
+            "build/dxmt-ios"
+            "build/d3d11-triangle"
+          )
+
+          for dir in "${BUILD_DIRS[@]}"; do
+            if [ -f "$dir/build.sh" ]; then
               echo "=========================================="
-              echo "Executing: $script"
+              echo "Building: $dir"
               echo "=========================================="
-              dir=$(dirname "$script")
               (cd "$dir" && bash ./build.sh)
             fi
           done
-
-      - name: Verify Static Libraries (.a)
-        run: |
-          echo "Checking generated static libraries:"
-          find . -name "*.a" -exec ls -lh {} +
 
       - name: Build iOS App with Xcode
         run: |
@@ -78,8 +92,6 @@ jobs:
             echo "❌ Error: Could not locate .xcodeproj file!"
             exit 1
           fi
-
-          echo "Building Xcode project at: $PROJ_PATH"
 
           xcodebuild \
             -project "$PROJ_PATH" \
@@ -108,7 +120,7 @@ jobs:
           cd build/ipa
           zip -r ../Madeira.ipa Payload
           cd ../..
-          echo "Successfully generated build/Madeira.ipa"
+          echo "✅ Generated build/Madeira.ipa"
 
       - name: Upload IPA Artifact
         if: success()
@@ -116,13 +128,3 @@ jobs:
         with:
           name: Madeira-IPA
           path: build/Madeira.ipa
-
-      - name: Upload Logs on Failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: failure-logs
-          path: |
-            build/**/*.log
-            build/**/*.err
-          retention-days: 7
