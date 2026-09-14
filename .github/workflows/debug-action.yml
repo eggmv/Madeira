@@ -1,0 +1,128 @@
+name: Build Madeira (Debug & Fix)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build-madeira:
+    name: Build Native Pieces & iOS App
+    runs-on: macos-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install System Build Dependencies
+        run: |
+          echo "Installing build prerequisites via Homebrew..."
+          brew install cmake ninja pkg-config llvm bison flex llvm@18 || true
+          echo "PATH=$(brew --prefix llvm)/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Force Initialize Submodules
+        run: |
+          set -e
+          echo "Checking git submodules..."
+          git submodule sync --recursive
+          git submodule update --init --recursive --force
+          git submodule status --recursive
+
+      - name: Verify Submodule Directory Contents
+        run: |
+          set -e
+          echo "Checking directory paths for build targets..."
+          ls -la
+          ls -la build/ || true
+          ls -la research/ || true
+
+      - name: Create Required Directory Structure
+        run: |
+          mkdir -p app/Madeira
+          mkdir -p build/derived
+          mkdir -p build/ntdll-unix/obj
+          mkdir -p build/win32u-unix/obj
+          mkdir -p build/dxmt-ios/obj
+
+      - name: Execute Native Build Scripts
+        run: |
+          set -e
+          echo "Running build.sh scripts..."
+          
+          # Iterate over all build scripts in build/ subdirectories
+          for script in build/*/build.sh; do
+            if [ -f "$script" ]; then
+              echo "=========================================="
+              echo "Executing: $script"
+              echo "=========================================="
+              dir=$(dirname "$script")
+              (cd "$dir" && bash ./build.sh)
+            fi
+          done
+
+      - name: Verify Static Libraries (.a)
+        run: |
+          echo "Checking generated static libraries:"
+          find . -name "*.a" -exec ls -lh {} +
+
+      - name: Build iOS App with Xcode
+        run: |
+          set -o pipefail
+          PROJ_PATH=$(find . -maxdepth 3 -name "*.xcodeproj" | head -n 1)
+
+          if [ -z "$PROJ_PATH" ]; then
+            echo "❌ Error: Could not locate .xcodeproj file!"
+            exit 1
+          fi
+
+          echo "Building Xcode project at: $PROJ_PATH"
+
+          xcodebuild \
+            -project "$PROJ_PATH" \
+            -scheme Madeira \
+            -configuration Release \
+            -derivedDataPath build/derived \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: Package IPA
+        if: success()
+        run: |
+          set -e
+          APP_PATH=$(find build/derived/Build/Products -type d -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ .app bundle not found!"
+            exit 1
+          fi
+
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          cd build/ipa
+          zip -r ../Madeira.ipa Payload
+          cd ../..
+          echo "Successfully generated build/Madeira.ipa"
+
+      - name: Upload IPA Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-IPA
+          path: build/Madeira.ipa
+
+      - name: Upload Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs
+          path: |
+            build/**/*.log
+            build/**/*.err
+          retention-days: 7
